@@ -1,6 +1,7 @@
+```yaml
 name: Build SADA GPS Camera APK
 
-on:
+'on':
   workflow_dispatch:
 
 permissions:
@@ -40,3 +41,4 @@ jobs:
           name: sada-gps-camera-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+```
