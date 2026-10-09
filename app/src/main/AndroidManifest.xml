@@ -20,7 +20,7 @@
         android:allowBackup="false"
         android:label="SADA GPS Camera"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/AppTheme"
 
         <!-- Google AdMob TEST App ID -->
         <meta-data
