@@ -1,7 +1,7 @@
-```yaml
+
 name: Build SADA GPS Camera APK
 
-'on':
+on:
   workflow_dispatch:
 
 permissions:
@@ -10,7 +10,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -41,4 +40,3 @@ jobs:
           name: sada-gps-camera-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-```
