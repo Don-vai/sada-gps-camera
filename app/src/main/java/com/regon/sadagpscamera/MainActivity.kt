@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.location.Address
@@ -18,8 +19,10 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.view.Gravity
+import android.view.Surface
 import android.view.ViewGroup
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
@@ -32,11 +35,17 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
 import com.google.android.gms.ads.MobileAds
 import com.google.android.gms.location.LocationServices
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -53,14 +62,15 @@ class MainActivity : ComponentActivity() {
     private lateinit var captureButton: Button
     private lateinit var flipButton: Button
     private lateinit var adView: AdView
+    private lateinit var miniMapView: MapView
     private lateinit var addressExecutor: ExecutorService
 
-    private lateinit var imageCapture: ImageCapture
-
+    private var imageCapture: ImageCapture? = null
     private var cameraProvider: ProcessCameraProvider? = null
+    private var mapMarker: Marker? = null
+
     private var lensFacing = CameraSelector.LENS_FACING_BACK
     private var isCapturing = false
-
     private var currentLocation: Location? = null
     private var currentAddress = "Address unavailable"
 
@@ -80,8 +90,6 @@ class MainActivity : ComponentActivity() {
             if (cameraGranted) {
                 startCamera()
             } else {
-                captureButton.isEnabled = false
-                flipButton.isEnabled = false
                 toast("Camera permission zaroori hai")
             }
 
@@ -103,15 +111,15 @@ class MainActivity : ComponentActivity() {
 
         addressExecutor = Executors.newSingleThreadExecutor()
 
+        Configuration.getInstance().userAgentValue = packageName
+
         createUI()
 
         try {
             System.loadLibrary("sada-native")
             getNativeMessage()
-        } catch (_: UnsatisfiedLinkError) {
-            toast("C++ native engine load nahi hua")
         } catch (_: Exception) {
-            toast("Native engine initialize nahi hua")
+            // Native library is optional for the camera UI.
         }
 
         requestAppPermissions()
@@ -125,9 +133,12 @@ class MainActivity : ComponentActivity() {
                 }
             }
         } catch (_: Exception) {
-            // Ads unavailable hone par camera kaam kar sakta hai.
+            // Camera remains usable if ads fail to initialize.
         }
     }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density + 0.5f).toInt()
 
     private fun hasPermission(permission: String): Boolean {
         return ContextCompat.checkSelfPermission(
@@ -137,7 +148,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------
-    // USER INTERFACE
+    // UI
     // --------------------------------------------------
 
     private fun createUI() {
@@ -147,28 +158,59 @@ class MainActivity : ComponentActivity() {
         }
 
         val header = TextView(this).apply {
-            text = "SADA GPS CAMERA"
-            textSize = 22f
+            text = "GPS CAMERA"
+            textSize = 20f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(12, 16, 12, 12)
+            setPadding(dp(8), dp(3), dp(8), dp(3))
+            maxLines = 1
         }
 
         root.addView(
             header,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                dp(40)
             )
         )
+
+        // Camera preview with mini map in the corner.
+        val cameraFrame = FrameLayout(this)
 
         previewView = PreviewView(this).apply {
             implementationMode =
                 PreviewView.ImplementationMode.COMPATIBLE
+            scaleType = PreviewView.ScaleType.FILL_CENTER
         }
 
-        root.addView(
+        cameraFrame.addView(
             previewView,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        )
+
+        miniMapView = MapView(this).apply {
+            setTileSource(TileSourceFactory.MAPNIK)
+            setMultiTouchControls(true)
+            controller.setZoom(15.0)
+            controller.setCenter(GeoPoint(20.5937, 78.9629))
+            contentDescription = "Current GPS location map"
+        }
+
+        val mapParams = FrameLayout.LayoutParams(
+            dp(130),
+            dp(150),
+            Gravity.TOP or Gravity.END
+        ).apply {
+            setMargins(0, dp(10), dp(10), 0)
+        }
+
+        cameraFrame.addView(miniMapView, mapParams)
+
+        root.addView(
+            cameraFrame,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
@@ -178,69 +220,74 @@ class MainActivity : ComponentActivity() {
 
         locationText = TextView(this).apply {
             text = "GPS location mil rahi hai..."
-            textSize = 12f
+            textSize = 10f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            setPadding(6, 10, 6, 10)
+            setPadding(dp(4), dp(2), dp(4), dp(2))
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
         }
 
         root.addView(
             locationText,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                dp(36)
             )
         )
 
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(4, 6, 4, 6)
+            setPadding(dp(3), dp(1), dp(3), dp(1))
         }
 
         captureButton = Button(this).apply {
             text = "TAKE PHOTO"
             textSize = 10f
+            minWidth = 0
+            minimumWidth = 0
+            isAllCaps = false
             isEnabled = false
-            setOnClickListener {
-                takePhoto()
-            }
+            setOnClickListener { takePhoto() }
         }
 
         flipButton = Button(this).apply {
             text = "FLIP CAMERA"
             textSize = 10f
+            minWidth = 0
+            minimumWidth = 0
+            isAllCaps = false
             isEnabled = false
-            setOnClickListener {
-                flipCamera()
-            }
+            setOnClickListener { flipCamera() }
         }
 
         val mapButton = Button(this).apply {
             text = "OPEN MAP"
             textSize = 10f
-            setOnClickListener {
-                openMap()
-            }
+            minWidth = 0
+            minimumWidth = 0
+            isAllCaps = false
+            setOnClickListener { openMap() }
         }
 
-        val buttonParams = LinearLayout.LayoutParams(
+        fun buttonParams() = LinearLayout.LayoutParams(
             0,
-            56,
+            dp(44),
             1f
         ).apply {
-            setMargins(2, 0, 2, 0)
+            setMargins(dp(2), 0, dp(2), 0)
         }
 
-        buttons.addView(captureButton, buttonParams)
-        buttons.addView(flipButton, buttonParams)
-        buttons.addView(mapButton, buttonParams)
+        buttons.addView(captureButton, buttonParams())
+        buttons.addView(flipButton, buttonParams())
+        buttons.addView(mapButton, buttonParams())
 
         root.addView(
             buttons,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                dp(48)
             )
         )
 
@@ -253,7 +300,7 @@ class MainActivity : ComponentActivity() {
             adView,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
+                dp(50)
             )
         )
 
@@ -272,9 +319,7 @@ class MainActivity : ComponentActivity() {
         )
 
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
-            permissions.add(
-                Manifest.permission.WRITE_EXTERNAL_STORAGE
-            )
+            permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
 
         val missing = permissions.distinct().filterNot {
@@ -290,7 +335,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------
-    // CAMERA START / FRONT-BACK SWITCH
+    // CAMERA
     // --------------------------------------------------
 
     private fun startCamera() {
@@ -300,8 +345,7 @@ class MainActivity : ComponentActivity() {
         captureButton.isEnabled = false
         flipButton.isEnabled = false
 
-        val providerFuture =
-            ProcessCameraProvider.getInstance(this)
+        val providerFuture = ProcessCameraProvider.getInstance(this)
 
         providerFuture.addListener({
 
@@ -309,7 +353,6 @@ class MainActivity : ComponentActivity() {
 
             try {
                 val provider = providerFuture.get()
-                cameraProvider = provider
 
                 val selector =
                     if (lensFacing == CameraSelector.LENS_FACING_FRONT) {
@@ -324,26 +367,28 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val preview = Preview.Builder().build()
-                preview.setSurfaceProvider(
-                    previewView.surfaceProvider
-                )
+                preview.setSurfaceProvider(previewView.surfaceProvider)
 
-                val newImageCapture = ImageCapture.Builder()
+                val rotation =
+                    previewView.display?.rotation ?: Surface.ROTATION_0
+
+                val capture = ImageCapture.Builder()
                     .setCaptureMode(
                         ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                     )
+                    .setTargetRotation(rotation)
                     .build()
 
                 provider.unbindAll()
-
                 provider.bindToLifecycle(
                     this,
                     selector,
                     preview,
-                    newImageCapture
+                    capture
                 )
 
-                imageCapture = newImageCapture
+                cameraProvider = provider
+                imageCapture = capture
 
                 captureButton.isEnabled = true
                 flipButton.isEnabled = true
@@ -356,13 +401,7 @@ class MainActivity : ComponentActivity() {
                     }
 
             } catch (e: Exception) {
-                captureButton.isEnabled = false
-                flipButton.isEnabled = false
-
-                toast(
-                    "Camera start nahi hua: " +
-                        (e.message ?: "Unknown error")
-                )
+                toast("Camera start nahi hua: ${e.message ?: "Unknown error"}")
             }
 
         }, ContextCompat.getMainExecutor(this))
@@ -370,14 +409,7 @@ class MainActivity : ComponentActivity() {
 
     private fun flipCamera() {
         if (isCapturing) {
-            toast("Photo save ho rahi hai, thoda wait karo")
-            return
-        }
-
-        val provider = cameraProvider
-
-        if (provider == null) {
-            toast("Camera abhi ready nahi hai")
+            toast("Photo save ho rahi hai, wait karo")
             return
         }
 
@@ -396,8 +428,9 @@ class MainActivity : ComponentActivity() {
             }
 
         try {
-            if (!provider.hasCamera(nextSelector)) {
-                toast("Ye camera device par available nahi hai")
+            val provider = cameraProvider
+            if (provider != null && !provider.hasCamera(nextSelector)) {
+                toast("Ye camera available nahi hai")
                 return
             }
         } catch (_: Exception) {
@@ -410,7 +443,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------
-    // GPS LOCATION
+    // GPS AND MINI MAP
     // --------------------------------------------------
 
     private fun updateLocation() {
@@ -425,10 +458,7 @@ class MainActivity : ComponentActivity() {
         try {
             locationClient.lastLocation
                 .addOnSuccessListener { location ->
-
-                    if (isFinishing || isDestroyed) {
-                        return@addOnSuccessListener
-                    }
+                    if (isFinishing || isDestroyed) return@addOnSuccessListener
 
                     if (location != null) {
                         currentLocation = location
@@ -453,9 +483,31 @@ class MainActivity : ComponentActivity() {
         val location = currentLocation ?: return
 
         locationText.text =
-            "$currentAddress\n" +
-                "Lat: ${location.latitude}   " +
-                "Lon: ${location.longitude}"
+            "$currentAddress\nLat: ${location.latitude}  Lon: ${location.longitude}"
+
+        updateMiniMap(location)
+    }
+
+    private fun updateMiniMap(location: Location) {
+        if (!::miniMapView.isInitialized) return
+
+        val point = GeoPoint(location.latitude, location.longitude)
+
+        miniMapView.controller.setCenter(point)
+
+        if (mapMarker == null) {
+            mapMarker = Marker(miniMapView).apply {
+                title = "Current GPS Location"
+                setAnchor(
+                    Marker.ANCHOR_CENTER,
+                    Marker.ANCHOR_BOTTOM
+                )
+            }
+            miniMapView.overlays.add(mapMarker)
+        }
+
+        mapMarker?.position = point
+        miniMapView.invalidate()
     }
 
     // --------------------------------------------------
@@ -463,17 +515,11 @@ class MainActivity : ComponentActivity() {
     // --------------------------------------------------
 
     private fun resolveAddress(location: Location) {
-        val prefs = getSharedPreferences(
-            "sada_gps_cache",
-            MODE_PRIVATE
-        )
+        val prefs = getSharedPreferences("gps_camera_cache", MODE_PRIVATE)
 
-        val cachedLat =
-            prefs.getString("lat", null)?.toDoubleOrNull()
-        val cachedLon =
-            prefs.getString("lon", null)?.toDoubleOrNull()
-        val cachedAddress =
-            prefs.getString("address", null)
+        val cachedLat = prefs.getString("lat", null)?.toDoubleOrNull()
+        val cachedLon = prefs.getString("lon", null)?.toDoubleOrNull()
+        val cachedAddress = prefs.getString("address", null)
 
         val cacheIsNearby =
             cachedLat != null &&
@@ -490,13 +536,13 @@ class MainActivity : ComponentActivity() {
             currentAddress = cachedAddress!!
             showLocation()
         } else {
-            currentAddress = "Finding area..."
+            currentAddress = "Finding address..."
             showLocation()
         }
 
         if (!Geocoder.isPresent()) {
             if (!cacheIsNearby) {
-                currentAddress = "Address unavailable offline"
+                currentAddress = "Address unavailable"
                 showLocation()
             }
             return
@@ -511,16 +557,10 @@ class MainActivity : ComponentActivity() {
                     location.longitude,
                     1,
                     object : Geocoder.GeocodeListener {
-
-                        override fun onGeocode(
-                            addresses: MutableList<Address>
-                        ) {
+                        override fun onGeocode(addresses: MutableList<Address>) {
                             runOnUiThread {
                                 if (!isFinishing && !isDestroyed) {
-                                    applyAddressResult(
-                                        addresses,
-                                        location
-                                    )
+                                    applyAddressResult(addresses, location)
                                 }
                             }
                         }
@@ -530,7 +570,7 @@ class MainActivity : ComponentActivity() {
                                 if (
                                     !isFinishing &&
                                     !isDestroyed &&
-                                    currentAddress == "Finding area..."
+                                    currentAddress == "Finding address..."
                                 ) {
                                     currentAddress = "Address unavailable"
                                     showLocation()
@@ -557,10 +597,7 @@ class MainActivity : ComponentActivity() {
 
                     runOnUiThread {
                         if (!isFinishing && !isDestroyed) {
-                            applyAddressResult(
-                                addresses.orEmpty(),
-                                location
-                            )
+                            applyAddressResult(addresses.orEmpty(), location)
                         }
                     }
                 } catch (_: Exception) {
@@ -568,7 +605,7 @@ class MainActivity : ComponentActivity() {
                         if (
                             !isFinishing &&
                             !isDestroyed &&
-                            currentAddress == "Finding area..."
+                            currentAddress == "Finding address..."
                         ) {
                             currentAddress = "Address unavailable"
                             showLocation()
@@ -583,18 +620,18 @@ class MainActivity : ComponentActivity() {
         addresses: List<Address>,
         location: Location
     ) {
-        val item = addresses.firstOrNull()
+        val address = addresses.firstOrNull()
 
-        val formatted = item?.let { address ->
+        val formatted = address?.let {
             listOfNotNull(
-                address.subLocality,
-                address.locality,
-                address.subAdminArea,
-                address.adminArea,
-                address.countryName
+                it.subLocality,
+                it.locality,
+                it.subAdminArea,
+                it.adminArea,
+                it.countryName
             )
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
+                .map { part -> part.trim() }
+                .filter { part -> part.isNotEmpty() }
                 .distinct()
                 .joinToString(", ")
         }
@@ -602,17 +639,13 @@ class MainActivity : ComponentActivity() {
         if (!formatted.isNullOrBlank()) {
             currentAddress = formatted
 
-            getSharedPreferences(
-                "sada_gps_cache",
-                MODE_PRIVATE
-            )
+            getSharedPreferences("gps_camera_cache", MODE_PRIVATE)
                 .edit()
                 .putString("lat", location.latitude.toString())
                 .putString("lon", location.longitude.toString())
                 .putString("address", formatted)
                 .apply()
-
-        } else if (currentAddress == "Finding area...") {
+        } else if (currentAddress == "Finding address...") {
             currentAddress = "Address unavailable"
         }
 
@@ -626,15 +659,7 @@ class MainActivity : ComponentActivity() {
         lon2: Double
     ): Double {
         val result = FloatArray(1)
-
-        Location.distanceBetween(
-            lat1,
-            lon1,
-            lat2,
-            lon2,
-            result
-        )
-
+        Location.distanceBetween(lat1, lon1, lat2, lon2, result)
         return result[0].toDouble()
     }
 
@@ -645,7 +670,8 @@ class MainActivity : ComponentActivity() {
     private fun takePhoto() {
         if (isCapturing) return
 
-        if (!::imageCapture.isInitialized) {
+        val capture = imageCapture
+        if (capture == null) {
             toast("Camera abhi ready nahi hai")
             return
         }
@@ -662,14 +688,13 @@ class MainActivity : ComponentActivity() {
 
         val photoFile = File(
             cacheDir,
-            "sada_${System.currentTimeMillis()}.jpg"
+            "gps_${System.currentTimeMillis()}.jpg"
         )
 
-        val options =
-            ImageCapture.OutputFileOptions.Builder(photoFile).build()
+        val options = ImageCapture.OutputFileOptions.Builder(photoFile).build()
 
         try {
-            imageCapture.takePicture(
+            capture.takePicture(
                 options,
                 ContextCompat.getMainExecutor(this),
                 object : ImageCapture.OnImageSavedCallback {
@@ -678,6 +703,7 @@ class MainActivity : ComponentActivity() {
                         output: ImageCapture.OutputFileResults
                     ) {
                         var original: Bitmap? = null
+                        var corrected: Bitmap? = null
                         var watermarked: Bitmap? = null
 
                         try {
@@ -687,47 +713,58 @@ class MainActivity : ComponentActivity() {
                                 "Photo decode nahi hui"
                             )
 
-                            watermarked = addWatermark(original)
+                            corrected = correctPhotoOrientation(
+                                original,
+                                photoFile
+                            )
+
+                            // Wait for map layout/rendering before drawing it.
+                            if (::miniMapView.isInitialized) {
+                                miniMapView.invalidate()
+                            }
+
+                            watermarked = addWatermark(corrected)
                             saveToGallery(watermarked)
 
                         } catch (e: Exception) {
                             toast(
-                                "Photo error: " +
-                                    (e.message ?: "Unknown error")
+                                "Photo error: ${e.message ?: "Unknown error"}"
                             )
                         } finally {
                             if (
                                 watermarked != null &&
+                                watermarked !== corrected &&
                                 watermarked !== original
                             ) {
                                 watermarked.recycle()
                             }
 
+                            if (
+                                corrected != null &&
+                                corrected !== original
+                            ) {
+                                corrected.recycle()
+                            }
+
                             original?.recycle()
                             photoFile.delete()
+
                             isCapturing = false
 
                             if (!isFinishing && !isDestroyed) {
-                                captureButton.isEnabled =
-                                    ::imageCapture.isInitialized
-                                flipButton.isEnabled =
-                                    cameraProvider != null
+                                captureButton.isEnabled = imageCapture != null
+                                flipButton.isEnabled = cameraProvider != null
                             }
                         }
                     }
 
-                    override fun onError(
-                        exception: ImageCaptureException
-                    ) {
+                    override fun onError(exception: ImageCaptureException) {
                         photoFile.delete()
                         isCapturing = false
 
                         if (!isFinishing && !isDestroyed) {
-                            captureButton.isEnabled =
-                                ::imageCapture.isInitialized
-                            flipButton.isEnabled =
-                                cameraProvider != null
-
+                            captureButton.isEnabled = imageCapture != null
+                            flipButton.isEnabled = cameraProvider != null
                             toast(
                                 "Photo nahi li ja saki: " +
                                     (exception.message ?: "Unknown error")
@@ -739,111 +776,292 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             photoFile.delete()
             isCapturing = false
-
-            captureButton.isEnabled =
-                ::imageCapture.isInitialized
-            flipButton.isEnabled =
-                cameraProvider != null
-
-            toast(
-                "Capture error: " +
-                    (e.message ?: "Unknown error")
-            )
+            captureButton.isEnabled = imageCapture != null
+            flipButton.isEnabled = cameraProvider != null
+            toast("Capture error: ${e.message ?: "Unknown error"}")
         }
     }
 
     // --------------------------------------------------
-    // GPS WATERMARK
+    // EXIF ORIENTATION CORRECTION
+    // --------------------------------------------------
+
+    private fun correctPhotoOrientation(
+        source: Bitmap,
+        file: File
+    ): Bitmap {
+        val exif = ExifInterface(file.absolutePath)
+
+        val orientation = exif.getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL
+        )
+
+        val matrix = Matrix()
+
+        when (orientation) {
+            ExifInterface.ORIENTATION_ROTATE_90 ->
+                matrix.postRotate(90f)
+
+            ExifInterface.ORIENTATION_ROTATE_180 ->
+                matrix.postRotate(180f)
+
+            ExifInterface.ORIENTATION_ROTATE_270 ->
+                matrix.postRotate(270f)
+
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL ->
+                matrix.preScale(-1f, 1f)
+
+            ExifInterface.ORIENTATION_FLIP_VERTICAL ->
+                matrix.preScale(1f, -1f)
+
+            ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.preScale(-1f, 1f)
+                matrix.postRotate(270f)
+            }
+
+            ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.preScale(-1f, 1f)
+                matrix.postRotate(90f)
+            }
+        }
+
+        if (matrix.isIdentity) return source
+
+        return Bitmap.createBitmap(
+            source,
+            0,
+            0,
+            source.width,
+            source.height,
+            matrix,
+            true
+        )
+    }
+
+    // --------------------------------------------------
+    // WATERMARK + MAP ON SAVED PHOTO
     // --------------------------------------------------
 
     private fun addWatermark(source: Bitmap): Bitmap {
         val result = source.copy(
             Bitmap.Config.ARGB_8888,
             true
-        ) ?: throw IllegalStateException(
-            "Watermark bitmap create nahi hua"
-        )
+        ) ?: throw IllegalStateException("Bitmap create nahi hua")
 
         val canvas = Canvas(result)
-        val location = currentLocation
+        val width = result.width.toFloat()
+        val height = result.height.toFloat()
 
+        val padding = (width * 0.025f).coerceAtLeast(8f)
+        val brandSize = (width * 0.023f).coerceAtLeast(12f)
+        val textSize = (width * 0.023f).coerceAtLeast(11f)
+        val lineHeight = textSize * 1.45f
+
+        val backgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(185, 0, 0, 0)
+        }
+
+        val brandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            this.textSize = brandSize
+            typeface = Typeface.create(
+                Typeface.DEFAULT,
+                Typeface.BOLD
+            )
+            textAlign = Paint.Align.CENTER
+        }
+
+        // Top branding.
+        val topHeight = brandSize + padding * 1.5f
+
+        canvas.drawRect(
+            0f,
+            0f,
+            width,
+            topHeight,
+            backgroundPaint
+        )
+
+        canvas.drawText(
+            "DEVELOPED BY SADA REGON",
+            width / 2f,
+            padding + brandSize * 0.85f,
+            brandPaint
+        )
+
+        val location = currentLocation
         val date = SimpleDateFormat(
             "dd MMM yyyy, hh:mm:ss a",
             Locale.getDefault()
         ).format(Date())
 
-        val gpsLines =
-            if (location != null) {
-                listOf(
-                    "Lat: ${location.latitude}",
-                    "Lon: ${location.longitude}"
-                )
-            } else {
-                listOf("GPS location unavailable")
-            }
+        // Reserve space on the right for the map.
+        val mapWidth = (width * 0.29f).toInt()
+        val mapHeight = (height * 0.19f).toInt()
+        val mapGap = padding
 
-        val lines = listOf(
-            "SADA GPS CAMERA",
-            currentAddress
-        ) + gpsLines + date
+        val mapLeft = width - mapWidth - padding
+        val mapTop = height - mapHeight - padding
+        val textMaxWidth = (mapLeft - padding * 2).coerceAtLeast(1f)
 
-        val padding = result.width * 0.025f
-        val textSize =
-            (result.width * 0.032f).coerceAtLeast(16f)
-        val lineHeight = textSize * 1.45f
-
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             this.textSize = textSize
             typeface = Typeface.create(
                 Typeface.DEFAULT,
                 Typeface.BOLD
             )
-            setShadowLayer(3f, 1f, 1f, Color.BLACK)
         }
 
-        val maxTextWidth =
-            (result.width - padding * 2).coerceAtLeast(1f)
+        val detailLines = mutableListOf<String>()
 
-        val safeLines = lines.map { line ->
-            var value = line
-
-            while (
-                value.isNotEmpty() &&
-                paint.measureText(value) > maxTextWidth
-            ) {
-                value = value.dropLast(1)
-            }
-
-            value
+        val address = currentAddress
+        if (address.isNotBlank()) {
+            detailLines.addAll(
+                wrapText(address, textPaint, textMaxWidth)
+            )
         }
 
-        val boxHeight =
-            padding * 2 + lineHeight * safeLines.size
-
-        val top =
-            (result.height - boxHeight).coerceAtLeast(0f)
-
-        val backgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(175, 0, 0, 0)
+        if (location != null) {
+            detailLines.add("Lat: ${location.latitude}")
+            detailLines.add("Lon: ${location.longitude}")
+        } else {
+            detailLines.add("GPS unavailable")
         }
+
+        detailLines.add(date)
+
+        val maximumLines = (
+            (mapHeight - padding).toFloat() / lineHeight
+        ).toInt().coerceAtLeast(2)
+
+        val visibleLines = detailLines.take(maximumLines)
+
+        val detailsTop = (height - mapHeight - padding).coerceAtLeast(topHeight)
 
         canvas.drawRect(
             0f,
-            top,
-            result.width.toFloat(),
-            result.height.toFloat(),
+            detailsTop,
+            width,
+            height,
             backgroundPaint
         )
 
-        safeLines.forEachIndexed { index, line ->
-            canvas.drawText(
-                line,
-                padding,
-                top + padding + textSize + index * lineHeight,
-                paint
-            )
+        visibleLines.forEachIndexed { index, line ->
+            val y = detailsTop + padding + textSize + index * lineHeight
+
+            if (y < height - padding) {
+                canvas.drawText(
+                    line,
+                    padding,
+                    y,
+                    textPaint
+                )
+            }
         }
+
+        // Render the mini map into the saved image.
+        if (
+            ::miniMapView.isInitialized &&
+            miniMapView.width > 0 &&
+            miniMapView.height > 0 &&
+            mapWidth > 0 &&
+            mapHeight > 0
+        ) {
+            var mapBitmap: Bitmap? = null
+
+            try {
+                mapBitmap = Bitmap.createBitmap(
+                    mapWidth,
+                    mapHeight,
+                    Bitmap.Config.ARGB_8888
+                )
+
+                val mapCanvas = Canvas(mapBitmap)
+
+                mapCanvas.scale(
+                    mapWidth.toFloat() / miniMapView.width,
+                    mapHeight.toFloat() / miniMapView.height
+                )
+
+                miniMapView.draw(mapCanvas)
+
+                canvas.drawBitmap(
+                    mapBitmap,
+                    mapLeft,
+                    mapTop,
+                    Paint(Paint.ANTI_ALIAS_FLAG)
+                )
+
+                val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = Color.WHITE
+                    style = Paint.Style.STROKE
+                    strokeWidth = (width * 0.003f).coerceAtLeast(2f)
+                }
+
+                canvas.drawRect(
+                    mapLeft,
+                    mapTop,
+                    mapLeft + mapWidth,
+                    mapTop + mapHeight,
+                    borderPaint
+                )
+            } catch (_: Exception) {
+                // Keep the photo even if map rendering fails.
+            } finally {
+                mapBitmap?.recycle()
+            }
+        }
+
+        return result
+    }
+
+    private fun wrapText(
+        text: String,
+        paint: Paint,
+        maxWidth: Float
+    ): List<String> {
+        if (paint.measureText(text) <= maxWidth) {
+            return listOf(text)
+        }
+
+        val result = mutableListOf<String>()
+        var current = ""
+
+        for (word in text.split(" ")) {
+            val candidate = if (current.isEmpty()) {
+                word
+            } else {
+                "$current $word"
+            }
+
+            if (paint.measureText(candidate) <= maxWidth) {
+                current = candidate
+            } else {
+                if (current.isNotEmpty()) result.add(current)
+                current = word
+
+                while (
+                    current.isNotEmpty() &&
+                    paint.measureText(current) > maxWidth
+                ) {
+                    var cut = current.length
+
+                    while (
+                        cut > 1 &&
+                        paint.measureText(current.substring(0, cut)) > maxWidth
+                    ) {
+                        cut--
+                    }
+
+                    result.add(current.substring(0, cut))
+                    current = current.substring(cut)
+                }
+            }
+        }
+
+        if (current.isNotEmpty()) result.add(current)
 
         return result
     }
@@ -857,67 +1075,42 @@ class MainActivity : ComponentActivity() {
             Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
             !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         ) {
-            throw SecurityException(
-                "Storage permission nahi mili"
-            )
+            throw SecurityException("Storage permission nahi mili")
         }
 
-        val filename =
-            "SADA_GPS_${System.currentTimeMillis()}.jpg"
+        val filename = "GPS_Camera_${System.currentTimeMillis()}.jpg"
 
         val values = ContentValues().apply {
-            put(
-                MediaStore.Images.Media.DISPLAY_NAME,
-                filename
-            )
-            put(
-                MediaStore.Images.Media.MIME_TYPE,
-                "image/jpeg"
-            )
+            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(
                     MediaStore.Images.Media.RELATIVE_PATH,
-                    "Pictures/SADA GPS Camera"
+                    "Pictures/GPS Camera"
                 )
-                put(
-                    MediaStore.Images.Media.IS_PENDING,
-                    1
-                )
+                put(MediaStore.Images.Media.IS_PENDING, 1)
             }
         }
 
         val uri = contentResolver.insert(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             values
-        ) ?: throw IllegalStateException(
-            "Gallery mein photo save nahi hui"
-        )
+        ) ?: throw IllegalStateException("Gallery mein photo save nahi hui")
 
         try {
             val stream = contentResolver.openOutputStream(uri)
-                ?: throw IllegalStateException(
-                    "Output stream unavailable"
-                )
+                ?: throw IllegalStateException("Output stream unavailable")
 
             stream.use {
-                if (
-                    !bitmap.compress(
-                        Bitmap.CompressFormat.JPEG,
-                        95,
-                        it
-                    )
-                ) {
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)) {
                     throw IllegalStateException("JPEG save failed")
                 }
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val completed = ContentValues().apply {
-                    put(
-                        MediaStore.Images.Media.IS_PENDING,
-                        0
-                    )
+                    put(MediaStore.Images.Media.IS_PENDING, 0)
                 }
 
                 contentResolver.update(uri, completed, null, null)
@@ -932,7 +1125,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------
-    // OPEN MAP
+    // OPEN MAP APP
     // --------------------------------------------------
 
     private fun openMap() {
@@ -964,6 +1157,26 @@ class MainActivity : ComponentActivity() {
         ).show()
     }
 
+    // --------------------------------------------------
+    // MAP LIFECYCLE
+    // --------------------------------------------------
+
+    override fun onResume() {
+        super.onResume()
+
+        if (::miniMapView.isInitialized) {
+            miniMapView.onResume()
+        }
+    }
+
+    override fun onPause() {
+        if (::miniMapView.isInitialized) {
+            miniMapView.onPause()
+        }
+
+        super.onPause()
+    }
+
     override fun onDestroy() {
         cameraProvider?.unbindAll()
 
@@ -973,6 +1186,10 @@ class MainActivity : ComponentActivity() {
 
         if (::adView.isInitialized) {
             adView.destroy()
+        }
+
+        if (::miniMapView.isInitialized) {
+            miniMapView.onDetach()
         }
 
         super.onDestroy()
