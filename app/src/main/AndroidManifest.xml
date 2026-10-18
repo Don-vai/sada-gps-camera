@@ -1,16 +1,24 @@
+
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Camera -->
     <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- GPS Location -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Internet for AdMob -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Storage for older Android versions -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!-- Camera hardware required -->
     <uses-feature
         android:name="android.hardware.camera"
         android:required="true" />
@@ -18,13 +26,17 @@
     <application
         android:allowBackup="false"
         android:label="SADA GPS Camera"
+        android:icon="@drawable/icon"
+        android:roundIcon="@drawable/icon"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
+        <!-- SADA GPS Camera: AdMob App ID -->
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-3940256099942544~3347511713" />
+            android:value="ca-app-pub-7597829209651046~7904354752" />
 
+        <!-- Main Camera Screen -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -35,6 +47,7 @@
             </intent-filter>
 
         </activity>
+
     </application>
 
 </manifest>
