@@ -3,7 +3,6 @@ package com.regon.sadagpscamera
 import android.Manifest
 import android.app.Dialog
 import android.content.ContentValues
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -18,10 +17,11 @@ import android.location.Location
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.provider.MediaStore
+import android.text.TextUtils
 import android.view.Gravity
 import android.view.Surface
+import android.view.View
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.FrameLayout
@@ -58,6 +58,8 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
+
+    private external fun getNativeMessage(): String
 
     private lateinit var previewView: PreviewView
     private lateinit var locationText: TextView
@@ -116,14 +118,14 @@ class MainActivity : ComponentActivity() {
 
         createUI()
 
-        // Native library is optional for the camera UI.
+        // Native library is optional.
         try {
             System.loadLibrary("sada-native")
             getNativeMessage()
         } catch (_: UnsatisfiedLinkError) {
-            // Continue without the native library.
+            // Continue without native functionality.
         } catch (_: Exception) {
-            // Continue without optional native functionality.
+            // Continue without native functionality.
         }
 
         requestAppPermissions()
@@ -137,11 +139,9 @@ class MainActivity : ComponentActivity() {
                 }
             }
         } catch (_: Exception) {
-            // Camera can still work if ads fail.
+            // Camera remains usable if ads fail.
         }
     }
-
-    private external fun getNativeMessage(): String
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()
@@ -154,11 +154,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toast(message: String) {
-        Toast.makeText(
-            this,
-            message,
-            Toast.LENGTH_LONG
-        ).show()
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     }
 
     // --------------------------------------------------
@@ -188,7 +184,6 @@ class MainActivity : ComponentActivity() {
             )
         )
 
-        // Camera preview and mini-map overlay.
         val cameraFrame = FrameLayout(this)
 
         previewView = PreviewView(this).apply {
@@ -239,7 +234,7 @@ class MainActivity : ComponentActivity() {
             gravity = Gravity.CENTER
             setPadding(dp(4), dp(2), dp(4), dp(2))
             maxLines = 2
-            ellipsize = android.text.TextUtils.TruncateAt.END
+            ellipsize = TextUtils.TruncateAt.END
         }
 
         root.addView(
@@ -276,7 +271,7 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { flipCamera() }
         }
 
-        // Replaces OPEN MAP with OPEN GALLERY.
+        // OPEN MAP has been replaced by OPEN GALLERY.
         val galleryButton = Button(this).apply {
             text = "OPEN GALLERY"
             textSize = 10f
@@ -307,7 +302,6 @@ class MainActivity : ComponentActivity() {
         )
 
         adView = AdView(this).apply {
-            // Your configured AdMob banner unit.
             adUnitId = "ca-app-pub-7597829209651046/3947878005"
             setAdSize(AdSize.BANNER)
         }
@@ -448,6 +442,7 @@ class MainActivity : ComponentActivity() {
 
         try {
             val provider = cameraProvider
+
             if (provider != null && !provider.hasCamera(nextSelector)) {
                 toast("Ye camera available nahi hai")
                 return
@@ -477,7 +472,9 @@ class MainActivity : ComponentActivity() {
         try {
             locationClient.lastLocation
                 .addOnSuccessListener { location ->
-                    if (isFinishing || isDestroyed) return@addOnSuccessListener
+                    if (isFinishing || isDestroyed) {
+                        return@addOnSuccessListener
+                    }
 
                     if (location != null) {
                         currentLocation = location
@@ -511,7 +508,6 @@ class MainActivity : ComponentActivity() {
         if (!::miniMapView.isInitialized) return
 
         val point = GeoPoint(location.latitude, location.longitude)
-
         miniMapView.controller.setCenter(point)
 
         if (mapMarker == null) {
@@ -783,10 +779,8 @@ class MainActivity : ComponentActivity() {
                             isCapturing = false
 
                             if (!isFinishing && !isDestroyed) {
-                                captureButton.isEnabled =
-                                    imageCapture != null
-                                flipButton.isEnabled =
-                                    cameraProvider != null
+                                captureButton.isEnabled = imageCapture != null
+                                flipButton.isEnabled = cameraProvider != null
                             }
                         }
                     }
@@ -798,10 +792,8 @@ class MainActivity : ComponentActivity() {
                         isCapturing = false
 
                         if (!isFinishing && !isDestroyed) {
-                            captureButton.isEnabled =
-                                imageCapture != null
-                            flipButton.isEnabled =
-                                cameraProvider != null
+                            captureButton.isEnabled = imageCapture != null
+                            flipButton.isEnabled = cameraProvider != null
 
                             toast(
                                 "Photo nahi li ja saki: " +
@@ -821,7 +813,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------
-    // EXIF ORIENTATION CORRECTION
+    // EXIF ORIENTATION
     // --------------------------------------------------
 
     private fun correctPhotoOrientation(
@@ -910,7 +902,6 @@ class MainActivity : ComponentActivity() {
             textAlign = Paint.Align.CENTER
         }
 
-        // Top branding.
         val topHeight = brandSize + padding * 1.5f
 
         canvas.drawRect(
@@ -935,7 +926,6 @@ class MainActivity : ComponentActivity() {
             Locale.getDefault()
         ).format(Date())
 
-        // Leave room at bottom-right for the mini-map.
         val mapWidth = (width * 0.29f).toInt()
         val mapHeight = (height * 0.19f).toInt()
         val mapLeft = width - mapWidth - padding
@@ -955,11 +945,7 @@ class MainActivity : ComponentActivity() {
 
         if (currentAddress.isNotBlank()) {
             detailLines.addAll(
-                wrapText(
-                    currentAddress,
-                    textPaint,
-                    textMaxWidth
-                )
+                wrapText(currentAddress, textPaint, textMaxWidth)
             )
         }
 
@@ -992,16 +978,10 @@ class MainActivity : ComponentActivity() {
             val y = detailsTop + padding + textSize + index * lineHeight
 
             if (y < height - padding) {
-                canvas.drawText(
-                    line,
-                    padding,
-                    y,
-                    textPaint
-                )
+                canvas.drawText(line, padding, y, textPaint)
             }
         }
 
-        // Draw the mini-map into the saved photo.
         if (
             ::miniMapView.isInitialized &&
             miniMapView.width > 0 &&
@@ -1048,7 +1028,7 @@ class MainActivity : ComponentActivity() {
                     borderPaint
                 )
             } catch (_: Exception) {
-                // Preserve the photo if map drawing fails.
+                // Keep photo even if map rendering fails.
             } finally {
                 mapBitmap?.recycle()
             }
@@ -1107,7 +1087,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------
-    // SAVE PHOTO TO Pictures/GPS Camera
+    // SAVE TO Pictures/GPS Camera
     // --------------------------------------------------
 
     private fun saveToGallery(bitmap: Bitmap) {
@@ -1142,9 +1122,7 @@ class MainActivity : ComponentActivity() {
 
         try {
             val stream = contentResolver.openOutputStream(uri)
-                ?: throw IllegalStateException(
-                    "Output stream unavailable"
-                )
+                ?: throw IllegalStateException("Output stream unavailable")
 
             stream.use {
                 if (
@@ -1175,7 +1153,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------
-    // OPEN APP'S OWN GALLERY
+    // OPEN GALLERY
     // --------------------------------------------------
 
     private fun openGalleryFolder() {
@@ -1209,9 +1187,10 @@ class MainActivity : ComponentActivity() {
             setPadding(dp(8), dp(8), dp(8), dp(8))
         }
 
+        // FIX 1: Use LinearLayout.LayoutParams here.
         scrollView.addView(
             photoList,
-            ScrollView.LayoutParams(
+            LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             )
@@ -1243,27 +1222,23 @@ class MainActivity : ComponentActivity() {
         dialog.setContentView(root)
         dialog.setCancelable(true)
 
-        // Find only photos in Pictures/GPS Camera.
         val projection = arrayOf(
             MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DISPLAY_NAME
         )
 
-        val selection: String
-        val selectionArgs: Array<String>
+        val selection: String?
+        val selectionArgs: Array<String>?
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            selection =
-                "${MediaStore.Images.Media.RELATIVE_PATH} = ?"
+            selection = "${MediaStore.Images.Media.RELATIVE_PATH} = ?"
             selectionArgs = arrayOf("Pictures/GPS Camera/")
         } else {
             @Suppress("DEPRECATION")
             val dataColumn = MediaStore.Images.Media.DATA
 
             selection = "$dataColumn LIKE ?"
-            selectionArgs = arrayOf(
-                "%/Pictures/GPS Camera/%"
-            )
+            selectionArgs = arrayOf("%/Pictures/GPS Camera/%")
         }
 
         try {
@@ -1305,7 +1280,8 @@ class MainActivity : ComponentActivity() {
                         }
                     )
 
-                    val divider = ViewGroup(this).apply {
+                    // FIX 2: ViewGroup is abstract; instantiate View instead.
+                    val divider = View(this).apply {
                         setBackgroundColor(Color.DKGRAY)
                     }
 
@@ -1325,12 +1301,7 @@ class MainActivity : ComponentActivity() {
                     textSize = 16f
                     setTextColor(Color.WHITE)
                     gravity = Gravity.CENTER
-                    setPadding(
-                        dp(16),
-                        dp(30),
-                        dp(16),
-                        dp(30)
-                    )
+                    setPadding(dp(16), dp(30), dp(16), dp(30))
                 }
 
                 photoList.addView(
