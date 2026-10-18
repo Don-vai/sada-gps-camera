@@ -1,4 +1,3 @@
-
 package com.regon.sadagpscamera
 
 import android.Manifest
@@ -12,6 +11,8 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.location.Address
+import android.location.Geocoder
 import android.location.Location
 import android.net.Uri
 import android.os.Build
@@ -23,7 +24,6 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
-
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -32,15 +32,12 @@ import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
-
 import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
 import com.google.android.gms.ads.MobileAds
 import com.google.android.gms.location.LocationServices
-
 import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -49,14 +46,24 @@ import java.util.concurrent.Executors
 
 class MainActivity : Activity() {
 
+    companion object {
+        init {
+            System.loadLibrary("sada-native")
+        }
+    }
+
+    private external fun getNativeMessage(): String
+
     private lateinit var previewView: PreviewView
     private lateinit var locationText: TextView
     private lateinit var captureButton: Button
     private lateinit var imageCapture: ImageCapture
-    private lateinit var cameraExecutor: ExecutorService
     private lateinit var adView: AdView
+    private lateinit var addressExecutor: ExecutorService
 
     private var currentLocation: Location? = null
+    private var currentAddress = "Address unavailable"
+    private var isCapturing = false
 
     private val locationClient by lazy {
         LocationServices.getFusedLocationProviderClient(this)
@@ -67,34 +74,50 @@ class MainActivity : Activity() {
             ActivityResultContracts.RequestMultiplePermissions()
         ) { permissions ->
 
-            val cameraGranted =
-                permissions[Manifest.permission.CAMERA] == true
-
-            if (cameraGranted) {
+            if (permissions[Manifest.permission.CAMERA] == true) {
                 startCamera()
             } else {
                 toast("Camera permission zaroori hai")
             }
 
-            if (
+            val locationGranted =
                 permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
                 permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-            ) {
+
+            if (locationGranted) {
                 updateLocation()
+            } else {
+                locationText.text = "GPS permission nahi mili"
+            }
+
+            if (
+                Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                permissions[Manifest.permission.WRITE_EXTERNAL_STORAGE] == false
+            ) {
+                toast("Android 9 par gallery save permission allow karo")
             }
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        cameraExecutor = Executors.newSingleThreadExecutor()
+        addressExecutor = Executors.newSingleThreadExecutor()
 
         createUI()
+
+        try {
+            getNativeMessage()
+        } catch (e: UnsatisfiedLinkError) {
+            toast("C++ native engine load nahi hua")
+        }
+
         requestAppPermissions()
 
         MobileAds.initialize(this) {
             runOnUiThread {
-                adView.loadAd(AdRequest.Builder().build())
+                if (::adView.isInitialized) {
+                    adView.loadAd(AdRequest.Builder().build())
+                }
             }
         }
     }
@@ -106,7 +129,7 @@ class MainActivity : Activity() {
         }
 
         val header = TextView(this).apply {
-            text = "SADA GPS CAMERA"
+            text = "SADA GPS CAMERA 7.0"
             textSize = 21f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
@@ -158,6 +181,7 @@ class MainActivity : Activity() {
 
         captureButton = Button(this).apply {
             text = "TAKE PHOTO"
+            isEnabled = false
             setOnClickListener { takePhoto() }
         }
 
@@ -195,11 +219,15 @@ class MainActivity : Activity() {
     }
 
     private fun requestAppPermissions() {
-        val permissions = arrayOf(
+        val permissions = mutableListOf(
             Manifest.permission.CAMERA,
             Manifest.permission.ACCESS_FINE_LOCATION,
             Manifest.permission.ACCESS_COARSE_LOCATION
         )
+
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
+            permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        }
 
         val missing = permissions.filter {
             ContextCompat.checkSelfPermission(this, it) !=
@@ -240,6 +268,8 @@ class MainActivity : Activity() {
                     imageCapture
                 )
 
+                captureButton.isEnabled = true
+
             } catch (e: Exception) {
                 toast("Camera start nahi hua: ${e.message}")
             }
@@ -267,13 +297,11 @@ class MainActivity : Activity() {
                 .addOnSuccessListener { location ->
                     if (location != null) {
                         currentLocation = location
-
-                        locationText.text =
-                            "Lat: ${location.latitude}\n" +
-                            "Lon: ${location.longitude}"
+                        showLocation()
+                        resolveAddress(location)
                     } else {
                         locationText.text =
-                            "Location abhi available nahi hai"
+                            "Location nahi mili. GPS on karke dobara try karo."
                     }
                 }
                 .addOnFailureListener {
@@ -284,12 +312,162 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun showLocation() {
+        val location = currentLocation ?: return
+
+        locationText.text =
+            "$currentAddress\n" +
+            "Lat: ${location.latitude}\n" +
+            "Lon: ${location.longitude}"
+    }
+
+    private fun resolveAddress(location: Location) {
+        val prefs = getSharedPreferences("sada_gps_cache", MODE_PRIVATE)
+
+        val cachedLat = prefs.getString("lat", null)?.toDoubleOrNull()
+        val cachedLon = prefs.getString("lon", null)?.toDoubleOrNull()
+        val cachedAddress = prefs.getString("address", null)
+
+        val cacheIsNearby =
+            cachedLat != null &&
+            cachedLon != null &&
+            !cachedAddress.isNullOrBlank() &&
+            distanceMeters(
+                location.latitude,
+                location.longitude,
+                cachedLat,
+                cachedLon
+            ) < 500.0
+
+        if (cacheIsNearby) {
+            currentAddress = cachedAddress!!
+            showLocation()
+        } else {
+            currentAddress = "Finding area..."
+            showLocation()
+        }
+
+        if (!Geocoder.isPresent()) {
+            if (!cacheIsNearby) {
+                currentAddress = "Address unavailable offline"
+                showLocation()
+            }
+            return
+        }
+
+        val geocoder = Geocoder(this, Locale.getDefault())
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            try {
+                geocoder.getFromLocation(
+                    location.latitude,
+                    location.longitude,
+                    1,
+                    object : Geocoder.GeocodeListener {
+
+                        override fun onGeocode(addresses: MutableList<Address>) {
+                            runOnUiThread {
+                                applyAddressResult(addresses, location)
+                            }
+                        }
+
+                        override fun onError(errorMessage: String?) {
+                            runOnUiThread {
+                                if (currentAddress == "Finding area...") {
+                                    currentAddress = "Address unavailable"
+                                    showLocation()
+                                }
+                            }
+                        }
+                    }
+                )
+            } catch (_: Exception) {
+                if (!cacheIsNearby) {
+                    currentAddress = "Address unavailable"
+                    showLocation()
+                }
+            }
+        } else {
+            addressExecutor.execute {
+                try {
+                    @Suppress("DEPRECATION")
+                    val addresses = geocoder.getFromLocation(
+                        location.latitude,
+                        location.longitude,
+                        1
+                    )
+
+                    runOnUiThread {
+                        applyAddressResult(addresses.orEmpty(), location)
+                    }
+                } catch (_: Exception) {
+                    runOnUiThread {
+                        if (currentAddress == "Finding area...") {
+                            currentAddress = "Address unavailable"
+                            showLocation()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun applyAddressResult(
+        addresses: List<Address>,
+        location: Location
+    ) {
+        val item = addresses.firstOrNull()
+
+        val formatted = item?.let { address ->
+            listOfNotNull(
+                address.subLocality,
+                address.locality,
+                address.subAdminArea,
+                address.adminArea,
+                address.countryName
+            )
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .joinToString(", ")
+        }
+
+        if (!formatted.isNullOrBlank()) {
+            currentAddress = formatted
+
+            getSharedPreferences("sada_gps_cache", MODE_PRIVATE)
+                .edit()
+                .putString("lat", location.latitude.toString())
+                .putString("lon", location.longitude.toString())
+                .putString("address", formatted)
+                .apply()
+        } else if (currentAddress == "Finding area...") {
+            currentAddress = "Address unavailable"
+        }
+
+        showLocation()
+    }
+
+    private fun distanceMeters(
+        lat1: Double,
+        lon1: Double,
+        lat2: Double,
+        lon2: Double
+    ): Double {
+        val result = FloatArray(1)
+        Location.distanceBetween(lat1, lon1, lat2, lon2, result)
+        return result[0].toDouble()
+    }
+
     private fun takePhoto() {
+        if (isCapturing) return
+
         if (!::imageCapture.isInitialized) {
             toast("Camera abhi ready nahi hai")
             return
         }
 
+        isCapturing = true
         captureButton.isEnabled = false
 
         val photoFile = File(
@@ -297,9 +475,7 @@ class MainActivity : Activity() {
             "sada_${System.currentTimeMillis()}.jpg"
         )
 
-        val options = ImageCapture.OutputFileOptions.Builder(
-            photoFile
-        ).build()
+        val options = ImageCapture.OutputFileOptions.Builder(photoFile).build()
 
         imageCapture.takePicture(
             options,
@@ -309,36 +485,36 @@ class MainActivity : Activity() {
                 override fun onImageSaved(
                     output: ImageCapture.OutputFileResults
                 ) {
+                    var original: Bitmap? = null
+                    var watermarked: Bitmap? = null
+
                     try {
-                        val bitmap = BitmapFactory.decodeFile(
+                        original = BitmapFactory.decodeFile(
                             photoFile.absolutePath
-                        )
+                        ) ?: throw IllegalStateException("Photo decode nahi hui")
 
-                        if (bitmap == null) {
-                            toast("Photo process nahi ho saki")
-                            return
-                        }
-
-                        val watermarked = addWatermark(bitmap)
+                        watermarked = addWatermark(original)
                         saveToGallery(watermarked)
 
-                        if (watermarked !== bitmap) {
+                    } catch (e: Exception) {
+                        toast("Photo error: ${e.message ?: "Unknown error"}")
+                    } finally {
+                        if (watermarked != null && watermarked !== original) {
                             watermarked.recycle()
                         }
 
-                        bitmap.recycle()
+                        original?.recycle()
                         photoFile.delete()
-
-                    } catch (e: Exception) {
-                        toast("Photo save error: ${e.message}")
-                    } finally {
+                        isCapturing = false
                         captureButton.isEnabled = true
                     }
                 }
 
                 override fun onError(exception: ImageCaptureException) {
+                    photoFile.delete()
+                    isCapturing = false
                     captureButton.isEnabled = true
-                    toast("Photo nahi li ja saki")
+                    toast("Photo nahi li ja saki: ${exception.message}")
                 }
             }
         )
@@ -346,45 +522,57 @@ class MainActivity : Activity() {
 
     private fun addWatermark(source: Bitmap): Bitmap {
         val result = source.copy(Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(result)
+            ?: throw IllegalStateException("Watermark bitmap create nahi hua")
 
+        val canvas = Canvas(result)
         val location = currentLocation
+
         val date = SimpleDateFormat(
-            "dd MMM yyyy, hh:mm a",
+            "dd MMM yyyy, hh:mm:ss a",
             Locale.getDefault()
         ).format(Date())
 
-        val gps = if (location != null) {
-            "Lat: ${location.latitude}\nLon: ${location.longitude}"
+        val gpsLines = if (location != null) {
+            listOf(
+                "Lat: ${location.latitude}",
+                "Lon: ${location.longitude}"
+            )
         } else {
-            "GPS location unavailable"
+            listOf("GPS location unavailable")
         }
 
         val lines = listOf(
             "SADA GPS CAMERA",
-            gps,
-            date
-        )
+            currentAddress
+        ) + gpsLines + date
 
-        val padding = result.width * 0.035f
-        val textSize = (result.width * 0.038f).coerceAtLeast(18f)
-        val lineHeight = textSize * 1.5f
+        val padding = result.width * 0.025f
+        val textSize = (result.width * 0.032f).coerceAtLeast(16f)
+        val lineHeight = textSize * 1.45f
 
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             this.textSize = textSize
-            typeface = Typeface.create(
-                Typeface.DEFAULT,
-                Typeface.BOLD
-            )
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             setShadowLayer(3f, 1f, 1f, Color.BLACK)
         }
 
-        val boxHeight = padding * 2 + lineHeight * lines.size
-        val top = result.height - boxHeight
+        val safeLines = lines.map { line ->
+            var value = line
+            while (
+                value.isNotEmpty() &&
+                paint.measureText(value) > result.width - padding * 2
+            ) {
+                value = value.dropLast(1)
+            }
+            value
+        }
 
-        val backgroundPaint = Paint().apply {
-            color = Color.argb(165, 0, 0, 0)
+        val boxHeight = padding * 2 + lineHeight * safeLines.size
+        val top = (result.height - boxHeight).coerceAtLeast(0f)
+
+        val backgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(175, 0, 0, 0)
         }
 
         canvas.drawRect(
@@ -395,7 +583,7 @@ class MainActivity : Activity() {
             backgroundPaint
         )
 
-        lines.forEachIndexed { index, line ->
+        safeLines.forEachIndexed { index, line ->
             canvas.drawText(
                 line,
                 padding,
@@ -423,22 +611,20 @@ class MainActivity : Activity() {
             }
         }
 
-        val uri: Uri? = contentResolver.insert(
+        val uri: Uri = contentResolver.insert(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             values
-        )
-
-        if (uri == null) {
-            toast("Gallery mein photo save nahi hui")
-            return
-        }
+        ) ?: throw IllegalStateException("Gallery mein photo save nahi hui")
 
         try {
-            contentResolver.openOutputStream(uri)?.use { stream ->
-                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)) {
+            val stream = contentResolver.openOutputStream(uri)
+                ?: throw IllegalStateException("Output stream unavailable")
+
+            stream.use {
+                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)) {
                     throw IllegalStateException("JPEG save failed")
                 }
-            } ?: throw IllegalStateException("Output stream unavailable")
+            }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val completed = ContentValues().apply {
@@ -452,7 +638,7 @@ class MainActivity : Activity() {
 
         } catch (e: Exception) {
             contentResolver.delete(uri, null, null)
-            toast("Save error: ${e.message}")
+            throw e
         }
     }
 
@@ -467,13 +653,11 @@ class MainActivity : Activity() {
 
         val uri = Uri.parse(
             "geo:${location.latitude},${location.longitude}" +
-            "?q=${location.latitude},${location.longitude}"
+                "?q=${location.latitude},${location.longitude}"
         )
 
-        val intent = Intent(Intent.ACTION_VIEW, uri)
-
         try {
-            startActivity(intent)
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
         } catch (_: Exception) {
             toast("Map app available nahi hai")
         }
@@ -484,8 +668,8 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        if (::cameraExecutor.isInitialized) {
-            cameraExecutor.shutdown()
+        if (::addressExecutor.isInitialized) {
+            addressExecutor.shutdown()
         }
 
         if (::adView.isInitialized) {
