@@ -46,13 +46,10 @@ import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
 
-    companion object {
-        init {
-            System.loadLibrary("sada-native")
-        }
-    }
-
+    // Native C++ method. Library is loaded safely in onCreate().
     private external fun getNativeMessage(): String
+
+    private var nativeLibraryLoaded = false
 
     private lateinit var previewView: PreviewView
     private lateinit var locationText: TextView
@@ -69,6 +66,7 @@ class MainActivity : ComponentActivity() {
         LocationServices.getFusedLocationProviderClient(this)
     }
 
+    // Permission request handler
     private val permissionLauncher =
         registerForActivityResult(
             ActivityResultContracts.RequestMultiplePermissions()
@@ -81,6 +79,7 @@ class MainActivity : ComponentActivity() {
             if (cameraGranted) {
                 startCamera()
             } else {
+                captureButton.isEnabled = false
                 toast("Camera permission zaroori hai")
             }
 
@@ -111,20 +110,35 @@ class MainActivity : ComponentActivity() {
 
         createUI()
 
+        // Load the native library without crashing the app if unavailable.
         try {
+            System.loadLibrary("sada-native")
+            nativeLibraryLoaded = true
             getNativeMessage()
         } catch (_: UnsatisfiedLinkError) {
+            nativeLibraryLoaded = false
             toast("C++ native engine load nahi hua")
+        } catch (_: Exception) {
+            toast("Native engine initialize nahi hua")
         }
 
         requestAppPermissions()
 
-        MobileAds.initialize(this) {
-            runOnUiThread {
-                if (!isFinishing && ::adView.isInitialized) {
-                    adView.loadAd(AdRequest.Builder().build())
+        // Initialize AdMob using the Google test ad configuration.
+        try {
+            MobileAds.initialize(this) {
+                runOnUiThread {
+                    if (
+                        !isFinishing &&
+                        !isDestroyed &&
+                        ::adView.isInitialized
+                    ) {
+                        adView.loadAd(AdRequest.Builder().build())
+                    }
                 }
             }
+        } catch (_: Exception) {
+            // Camera and GPS features can still work if ads fail.
         }
     }
 
@@ -134,6 +148,10 @@ class MainActivity : ComponentActivity() {
             permission
         ) == PackageManager.PERMISSION_GRANTED
     }
+
+    // --------------------------------------------------
+    // USER INTERFACE
+    // --------------------------------------------------
 
     private fun createUI() {
         val root = LinearLayout(this).apply {
@@ -195,12 +213,16 @@ class MainActivity : ComponentActivity() {
         captureButton = Button(this).apply {
             text = "TAKE PHOTO"
             isEnabled = false
-            setOnClickListener { takePhoto() }
+            setOnClickListener {
+                takePhoto()
+            }
         }
 
         val mapButton = Button(this).apply {
             text = "OPEN MAP"
-            setOnClickListener { openMap() }
+            setOnClickListener {
+                openMap()
+            }
         }
 
         buttons.addView(
@@ -231,6 +253,10 @@ class MainActivity : ComponentActivity() {
         setContentView(root)
     }
 
+    // --------------------------------------------------
+    // PERMISSIONS
+    // --------------------------------------------------
+
     private fun requestAppPermissions() {
         val permissions = mutableListOf(
             Manifest.permission.CAMERA,
@@ -239,7 +265,9 @@ class MainActivity : ComponentActivity() {
         )
 
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
-            permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            permissions.add(
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            )
         }
 
         val missing = permissions.distinct().filterNot {
@@ -254,22 +282,27 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // --------------------------------------------------
+    // CAMERA
+    // --------------------------------------------------
+
     private fun startCamera() {
         if (!hasPermission(Manifest.permission.CAMERA)) return
+        if (isFinishing || isDestroyed) return
 
         val providerFuture = ProcessCameraProvider.getInstance(this)
 
         providerFuture.addListener({
+
             if (isFinishing || isDestroyed) return@addListener
 
             try {
                 val provider = providerFuture.get()
 
-                val preview = Preview.Builder()
-                    .build()
-                    .also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
+                // Explicit method call avoids the surfaceProvider
+                // Kotlin property resolution problem.
+                val preview = Preview.Builder().build()
+                preview.setSurfaceProvider(previewView.surfaceProvider)
 
                 val capture = ImageCapture.Builder()
                     .setCaptureMode(
@@ -290,10 +323,19 @@ class MainActivity : ComponentActivity() {
                 captureButton.isEnabled = true
 
             } catch (e: Exception) {
-                toast("Camera start nahi hua: ${e.message}")
+                captureButton.isEnabled = false
+                toast(
+                    "Camera start nahi hua: " +
+                        (e.message ?: "Unknown error")
+                )
             }
+
         }, ContextCompat.getMainExecutor(this))
     }
+
+    // --------------------------------------------------
+    // GPS LOCATION
+    // --------------------------------------------------
 
     private fun updateLocation() {
         val fineGranted =
@@ -310,6 +352,9 @@ class MainActivity : ComponentActivity() {
         try {
             locationClient.lastLocation
                 .addOnSuccessListener { location ->
+
+                    if (isFinishing || isDestroyed) return@addOnSuccessListener
+
                     if (location != null) {
                         currentLocation = location
                         showLocation()
@@ -320,8 +365,11 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 .addOnFailureListener {
-                    locationText.text = "GPS location nahi mil saki"
+                    if (!isFinishing && !isDestroyed) {
+                        locationText.text = "GPS location nahi mil saki"
+                    }
                 }
+
         } catch (_: SecurityException) {
             locationText.text = "GPS permission check karo"
         }
@@ -336,8 +384,15 @@ class MainActivity : ComponentActivity() {
                 "Lon: ${location.longitude}"
     }
 
+    // --------------------------------------------------
+    // ADDRESS LOOKUP AND CACHE
+    // --------------------------------------------------
+
     private fun resolveAddress(location: Location) {
-        val prefs = getSharedPreferences("sada_gps_cache", MODE_PRIVATE)
+        val prefs = getSharedPreferences(
+            "sada_gps_cache",
+            MODE_PRIVATE
+        )
 
         val cachedLat = prefs.getString("lat", null)?.toDoubleOrNull()
         val cachedLon = prefs.getString("lon", null)?.toDoubleOrNull()
@@ -380,15 +435,23 @@ class MainActivity : ComponentActivity() {
                     1,
                     object : Geocoder.GeocodeListener {
 
-                        override fun onGeocode(addresses: MutableList<Address>) {
+                        override fun onGeocode(
+                            addresses: MutableList<Address>
+                        ) {
                             runOnUiThread {
-                                applyAddressResult(addresses, location)
+                                if (!isFinishing && !isDestroyed) {
+                                    applyAddressResult(addresses, location)
+                                }
                             }
                         }
 
                         override fun onError(errorMessage: String?) {
                             runOnUiThread {
-                                if (currentAddress == "Finding area...") {
+                                if (
+                                    !isFinishing &&
+                                    !isDestroyed &&
+                                    currentAddress == "Finding area..."
+                                ) {
                                     currentAddress = "Address unavailable"
                                     showLocation()
                                 }
@@ -413,11 +476,20 @@ class MainActivity : ComponentActivity() {
                     )
 
                     runOnUiThread {
-                        applyAddressResult(addresses.orEmpty(), location)
+                        if (!isFinishing && !isDestroyed) {
+                            applyAddressResult(
+                                addresses.orEmpty(),
+                                location
+                            )
+                        }
                     }
                 } catch (_: Exception) {
                     runOnUiThread {
-                        if (currentAddress == "Finding area...") {
+                        if (
+                            !isFinishing &&
+                            !isDestroyed &&
+                            currentAddress == "Finding area..."
+                        ) {
                             currentAddress = "Address unavailable"
                             showLocation()
                         }
@@ -450,12 +522,16 @@ class MainActivity : ComponentActivity() {
         if (!formatted.isNullOrBlank()) {
             currentAddress = formatted
 
-            getSharedPreferences("sada_gps_cache", MODE_PRIVATE)
+            getSharedPreferences(
+                "sada_gps_cache",
+                MODE_PRIVATE
+            )
                 .edit()
                 .putString("lat", location.latitude.toString())
                 .putString("lon", location.longitude.toString())
                 .putString("address", formatted)
                 .apply()
+
         } else if (currentAddress == "Finding area...") {
             currentAddress = "Address unavailable"
         }
@@ -470,15 +546,33 @@ class MainActivity : ComponentActivity() {
         lon2: Double
     ): Double {
         val result = FloatArray(1)
-        Location.distanceBetween(lat1, lon1, lat2, lon2, result)
+
+        Location.distanceBetween(
+            lat1,
+            lon1,
+            lat2,
+            lon2,
+            result
+        )
+
         return result[0].toDouble()
     }
+
+    // --------------------------------------------------
+    // TAKE PHOTO
+    // --------------------------------------------------
 
     private fun takePhoto() {
         if (isCapturing) return
 
         if (!::imageCapture.isInitialized) {
             toast("Camera abhi ready nahi hai")
+            return
+        }
+
+        if (!hasPermission(Manifest.permission.CAMERA)) {
+            toast("Camera permission zaroori hai")
+            requestAppPermissions()
             return
         }
 
@@ -490,61 +584,101 @@ class MainActivity : ComponentActivity() {
             "sada_${System.currentTimeMillis()}.jpg"
         )
 
-        val options = ImageCapture.OutputFileOptions.Builder(photoFile)
-            .build()
+        val options = ImageCapture.OutputFileOptions.Builder(
+            photoFile
+        ).build()
 
-        imageCapture.takePicture(
-            options,
-            ContextCompat.getMainExecutor(this),
-            object : ImageCapture.OnImageSavedCallback {
+        try {
+            imageCapture.takePicture(
+                options,
+                ContextCompat.getMainExecutor(this),
+                object : ImageCapture.OnImageSavedCallback {
 
-                override fun onImageSaved(
-                    output: ImageCapture.OutputFileResults
-                ) {
-                    var original: Bitmap? = null
-                    var watermarked: Bitmap? = null
+                    override fun onImageSaved(
+                        output: ImageCapture.OutputFileResults
+                    ) {
+                        var original: Bitmap? = null
+                        var watermarked: Bitmap? = null
 
-                    try {
-                        original = BitmapFactory.decodeFile(
-                            photoFile.absolutePath
-                        ) ?: throw IllegalStateException(
-                            "Photo decode nahi hui"
-                        )
+                        try {
+                            original = BitmapFactory.decodeFile(
+                                photoFile.absolutePath
+                            ) ?: throw IllegalStateException(
+                                "Photo decode nahi hui"
+                            )
 
-                        watermarked = addWatermark(original)
-                        saveToGallery(watermarked)
+                            watermarked = addWatermark(original)
+                            saveToGallery(watermarked)
 
-                    } catch (e: Exception) {
-                        toast("Photo error: ${e.message ?: "Unknown error"}")
-                    } finally {
-                        if (watermarked != null && watermarked !== original) {
-                            watermarked.recycle()
+                        } catch (e: Exception) {
+                            toast(
+                                "Photo error: " +
+                                    (e.message ?: "Unknown error")
+                            )
+                        } finally {
+                            if (
+                                watermarked != null &&
+                                watermarked !== original
+                            ) {
+                                watermarked.recycle()
+                            }
+
+                            original?.recycle()
+                            photoFile.delete()
+                            isCapturing = false
+
+                            if (!isFinishing && !isDestroyed) {
+                                captureButton.isEnabled =
+                                    ::imageCapture.isInitialized
+                            }
                         }
+                    }
 
-                        original?.recycle()
+                    override fun onError(
+                        exception: ImageCaptureException
+                    ) {
                         photoFile.delete()
                         isCapturing = false
 
-                        if (!isFinishing) {
+                        if (!isFinishing && !isDestroyed) {
                             captureButton.isEnabled =
                                 ::imageCapture.isInitialized
+
+                            toast(
+                                "Photo nahi li ja saki: " +
+                                    (exception.message ?: "Unknown error")
+                            )
                         }
                     }
                 }
+            )
+        } catch (e: Exception) {
+            photoFile.delete()
+            isCapturing = false
 
-                override fun onError(exception: ImageCaptureException) {
-                    photoFile.delete()
-                    isCapturing = false
-                    captureButton.isEnabled = true
-                    toast("Photo nahi li ja saki: ${exception.message}")
-                }
+            if (!isFinishing && !isDestroyed) {
+                captureButton.isEnabled =
+                    ::imageCapture.isInitialized
+
+                toast(
+                    "Camera capture error: " +
+                        (e.message ?: "Unknown error")
+                )
             }
-        )
+        }
     }
 
+    // --------------------------------------------------
+    // GPS WATERMARK
+    // --------------------------------------------------
+
     private fun addWatermark(source: Bitmap): Bitmap {
-        val result = source.copy(Bitmap.Config.ARGB_8888, true)
-            ?: throw IllegalStateException("Watermark bitmap create nahi hua")
+        val result = source.copy(
+            Bitmap.Config.ARGB_8888,
+            true
+        ) ?: throw IllegalStateException(
+            "Watermark bitmap create nahi hua"
+        )
 
         val canvas = Canvas(result)
         val location = currentLocation
@@ -575,11 +709,15 @@ class MainActivity : ComponentActivity() {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             this.textSize = textSize
-            typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+            typeface = Typeface.create(
+                Typeface.DEFAULT,
+                Typeface.BOLD
+            )
             setShadowLayer(3f, 1f, 1f, Color.BLACK)
         }
 
-        val maxTextWidth = (result.width - padding * 2).coerceAtLeast(1f)
+        val maxTextWidth =
+            (result.width - padding * 2).coerceAtLeast(1f)
 
         val safeLines = lines.map { line ->
             var value = line
@@ -594,8 +732,11 @@ class MainActivity : ComponentActivity() {
             value
         }
 
-        val boxHeight = padding * 2 + lineHeight * safeLines.size
-        val top = (result.height - boxHeight).coerceAtLeast(0f)
+        val boxHeight =
+            padding * 2 + lineHeight * safeLines.size
+
+        val top =
+            (result.height - boxHeight).coerceAtLeast(0f)
 
         val backgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.argb(175, 0, 0, 0)
@@ -621,50 +762,86 @@ class MainActivity : ComponentActivity() {
         return result
     }
 
+    // --------------------------------------------------
+    // SAVE PHOTO TO GALLERY
+    // --------------------------------------------------
+
     private fun saveToGallery(bitmap: Bitmap) {
         if (
             Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
             !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         ) {
-            throw SecurityException("Storage permission nahi mili")
+            throw SecurityException(
+                "Storage permission nahi mili"
+            )
         }
 
-        val filename = "SADA_GPS_${System.currentTimeMillis()}.jpg"
+        val filename =
+            "SADA_GPS_${System.currentTimeMillis()}.jpg"
 
         val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, filename)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(
+                MediaStore.Images.Media.DISPLAY_NAME,
+                filename
+            )
+
+            put(
+                MediaStore.Images.Media.MIME_TYPE,
+                "image/jpeg"
+            )
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 put(
                     MediaStore.Images.Media.RELATIVE_PATH,
                     "Pictures/SADA GPS Camera"
                 )
-                put(MediaStore.Images.Media.IS_PENDING, 1)
+
+                put(
+                    MediaStore.Images.Media.IS_PENDING,
+                    1
+                )
             }
         }
 
         val uri: Uri = contentResolver.insert(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             values
-        ) ?: throw IllegalStateException("Gallery mein photo save nahi hui")
+        ) ?: throw IllegalStateException(
+            "Gallery mein photo save nahi hui"
+        )
 
         try {
             val stream = contentResolver.openOutputStream(uri)
-                ?: throw IllegalStateException("Output stream unavailable")
+                ?: throw IllegalStateException(
+                    "Output stream unavailable"
+                )
 
             stream.use {
-                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)) {
+                if (
+                    !bitmap.compress(
+                        Bitmap.CompressFormat.JPEG,
+                        95,
+                        it
+                    )
+                ) {
                     throw IllegalStateException("JPEG save failed")
                 }
             }
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val completed = ContentValues().apply {
-                    put(MediaStore.Images.Media.IS_PENDING, 0)
+                    put(
+                        MediaStore.Images.Media.IS_PENDING,
+                        0
+                    )
                 }
 
-                contentResolver.update(uri, completed, null, null)
+                contentResolver.update(
+                    uri,
+                    completed,
+                    null,
+                    null
+                )
             }
 
             toast("Photo Gallery mein save ho gayi!")
@@ -674,6 +851,10 @@ class MainActivity : ComponentActivity() {
             throw e
         }
     }
+
+    // --------------------------------------------------
+    // OPEN MAP
+    // --------------------------------------------------
 
     private fun openMap() {
         val location = currentLocation
@@ -690,15 +871,29 @@ class MainActivity : ComponentActivity() {
         )
 
         try {
-            startActivity(Intent(Intent.ACTION_VIEW, uri))
+            startActivity(
+                Intent(Intent.ACTION_VIEW, uri)
+            )
         } catch (_: Exception) {
             toast("Map app available nahi hai")
         }
     }
 
+    // --------------------------------------------------
+    // MESSAGE
+    // --------------------------------------------------
+
     private fun toast(message: String) {
-        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        Toast.makeText(
+            this,
+            message,
+            Toast.LENGTH_LONG
+        ).show()
     }
+
+    // --------------------------------------------------
+    // CLEANUP
+    // --------------------------------------------------
 
     override fun onDestroy() {
         if (::addressExecutor.isInitialized) {
