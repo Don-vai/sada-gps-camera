@@ -1,7 +1,6 @@
 package com.regon.sadagpscamera
 
 import android.Manifest
-import android.app.Activity
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -24,6 +23,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
@@ -44,7 +44,7 @@ import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
 
     companion object {
         init {
@@ -74,7 +74,11 @@ class MainActivity : Activity() {
             ActivityResultContracts.RequestMultiplePermissions()
         ) { permissions ->
 
-            if (permissions[Manifest.permission.CAMERA] == true) {
+            val cameraGranted =
+                permissions[Manifest.permission.CAMERA] == true ||
+                    hasPermission(Manifest.permission.CAMERA)
+
+            if (cameraGranted) {
                 startCamera()
             } else {
                 toast("Camera permission zaroori hai")
@@ -82,7 +86,9 @@ class MainActivity : Activity() {
 
             val locationGranted =
                 permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
-                permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+                    permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true ||
+                    hasPermission(Manifest.permission.ACCESS_FINE_LOCATION) ||
+                    hasPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
 
             if (locationGranted) {
                 updateLocation()
@@ -92,9 +98,9 @@ class MainActivity : Activity() {
 
             if (
                 Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
-                permissions[Manifest.permission.WRITE_EXTERNAL_STORAGE] == false
+                !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             ) {
-                toast("Android 9 par gallery save permission allow karo")
+                toast("Gallery save ke liye storage permission allow karo")
             }
         }
 
@@ -107,7 +113,7 @@ class MainActivity : Activity() {
 
         try {
             getNativeMessage()
-        } catch (e: UnsatisfiedLinkError) {
+        } catch (_: UnsatisfiedLinkError) {
             toast("C++ native engine load nahi hua")
         }
 
@@ -115,11 +121,18 @@ class MainActivity : Activity() {
 
         MobileAds.initialize(this) {
             runOnUiThread {
-                if (::adView.isInitialized) {
+                if (!isFinishing && ::adView.isInitialized) {
                     adView.loadAd(AdRequest.Builder().build())
                 }
             }
         }
+    }
+
+    private fun hasPermission(permission: String): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            permission
+        ) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun createUI() {
@@ -229,9 +242,8 @@ class MainActivity : Activity() {
             permissions.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
 
-        val missing = permissions.filter {
-            ContextCompat.checkSelfPermission(this, it) !=
-                PackageManager.PERMISSION_GRANTED
+        val missing = permissions.distinct().filterNot {
+            hasPermission(it)
         }
 
         if (missing.isEmpty()) {
@@ -243,17 +255,23 @@ class MainActivity : Activity() {
     }
 
     private fun startCamera() {
+        if (!hasPermission(Manifest.permission.CAMERA)) return
+
         val providerFuture = ProcessCameraProvider.getInstance(this)
 
         providerFuture.addListener({
+            if (isFinishing || isDestroyed) return@addListener
+
             try {
                 val provider = providerFuture.get()
 
-                val preview = Preview.Builder().build().also {
-                    it.surfaceProvider = previewView.surfaceProvider
-                }
+                val preview = Preview.Builder()
+                    .build()
+                    .also {
+                        it.surfaceProvider = previewView.surfaceProvider
+                    }
 
-                imageCapture = ImageCapture.Builder()
+                val capture = ImageCapture.Builder()
                     .setCaptureMode(
                         ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY
                     )
@@ -265,9 +283,10 @@ class MainActivity : Activity() {
                     this,
                     CameraSelector.DEFAULT_BACK_CAMERA,
                     preview,
-                    imageCapture
+                    capture
                 )
 
+                imageCapture = capture
                 captureButton.isEnabled = true
 
             } catch (e: Exception) {
@@ -277,15 +296,11 @@ class MainActivity : Activity() {
     }
 
     private fun updateLocation() {
-        val fineGranted = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
+        val fineGranted =
+            hasPermission(Manifest.permission.ACCESS_FINE_LOCATION)
 
-        val coarseGranted = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.ACCESS_COARSE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
+        val coarseGranted =
+            hasPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
 
         if (!fineGranted && !coarseGranted) {
             locationText.text = "GPS permission nahi mili"
@@ -317,8 +332,8 @@ class MainActivity : Activity() {
 
         locationText.text =
             "$currentAddress\n" +
-            "Lat: ${location.latitude}\n" +
-            "Lon: ${location.longitude}"
+                "Lat: ${location.latitude}\n" +
+                "Lon: ${location.longitude}"
     }
 
     private fun resolveAddress(location: Location) {
@@ -330,14 +345,14 @@ class MainActivity : Activity() {
 
         val cacheIsNearby =
             cachedLat != null &&
-            cachedLon != null &&
-            !cachedAddress.isNullOrBlank() &&
-            distanceMeters(
-                location.latitude,
-                location.longitude,
-                cachedLat,
-                cachedLon
-            ) < 500.0
+                cachedLon != null &&
+                !cachedAddress.isNullOrBlank() &&
+                distanceMeters(
+                    location.latitude,
+                    location.longitude,
+                    cachedLat,
+                    cachedLon
+                ) < 500.0
 
         if (cacheIsNearby) {
             currentAddress = cachedAddress!!
@@ -475,7 +490,8 @@ class MainActivity : Activity() {
             "sada_${System.currentTimeMillis()}.jpg"
         )
 
-        val options = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+        val options = ImageCapture.OutputFileOptions.Builder(photoFile)
+            .build()
 
         imageCapture.takePicture(
             options,
@@ -491,7 +507,9 @@ class MainActivity : Activity() {
                     try {
                         original = BitmapFactory.decodeFile(
                             photoFile.absolutePath
-                        ) ?: throw IllegalStateException("Photo decode nahi hui")
+                        ) ?: throw IllegalStateException(
+                            "Photo decode nahi hui"
+                        )
 
                         watermarked = addWatermark(original)
                         saveToGallery(watermarked)
@@ -506,7 +524,11 @@ class MainActivity : Activity() {
                         original?.recycle()
                         photoFile.delete()
                         isCapturing = false
-                        captureButton.isEnabled = true
+
+                        if (!isFinishing) {
+                            captureButton.isEnabled =
+                                ::imageCapture.isInitialized
+                        }
                     }
                 }
 
@@ -557,14 +579,18 @@ class MainActivity : Activity() {
             setShadowLayer(3f, 1f, 1f, Color.BLACK)
         }
 
+        val maxTextWidth = (result.width - padding * 2).coerceAtLeast(1f)
+
         val safeLines = lines.map { line ->
             var value = line
+
             while (
                 value.isNotEmpty() &&
-                paint.measureText(value) > result.width - padding * 2
+                paint.measureText(value) > maxTextWidth
             ) {
                 value = value.dropLast(1)
             }
+
             value
         }
 
@@ -596,6 +622,13 @@ class MainActivity : Activity() {
     }
 
     private fun saveToGallery(bitmap: Bitmap) {
+        if (
+            Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            !hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        ) {
+            throw SecurityException("Storage permission nahi mili")
+        }
+
         val filename = "SADA_GPS_${System.currentTimeMillis()}.jpg"
 
         val values = ContentValues().apply {
