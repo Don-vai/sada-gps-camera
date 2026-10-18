@@ -1,3 +1,4 @@
+
 name: Build SADA GPS Camera APK
 
 'on':
@@ -10,6 +11,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -20,27 +24,38 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3.2.1
+      - name: Configure Android SDK
+        run: |
+          mkdir -p "$ANDROID_HOME"
+          echo "$ANDROID_HOME/cmdline-tools/11.0/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/build-tools/34.0.0" >> "$GITHUB_PATH"
 
       - name: Install Android SDK, NDK and CMake
         run: |
-          sdkmanager --install \
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/11.0/bin/sdkmanager"
+
+          if [ ! -f "$SDKMANAGER" ]; then
+            echo "sdkmanager not found at $SDKMANAGER"
+            find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --licenses || true
+
+          "$SDKMANAGER" --sdk_root="$ANDROID_HOME" --install \
             "platforms;android-34" \
             "build-tools;34.0.0" \
             "platform-tools" \
             "ndk;27.2.12479018" \
             "cmake;3.22.1"
 
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses || true
-
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: "8.11.1"
 
-      - name: Check native source files
+      - name: Verify native source files
         run: |
           test -f app/src/main/cpp/CMakeLists.txt
           test -f app/src/main/cpp/native-lib.cpp
