@@ -1,6 +1,7 @@
 package com.regon.sadagpscamera
 
 import android.Manifest
+import android.app.Dialog
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -17,13 +18,16 @@ import android.location.Location
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
 import android.view.Gravity
 import android.view.Surface
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -54,8 +58,6 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
-
-    private external fun getNativeMessage(): String
 
     private lateinit var previewView: PreviewView
     private lateinit var locationText: TextView
@@ -101,7 +103,7 @@ class MainActivity : ComponentActivity() {
 
             if (locationGranted) {
                 updateLocation()
-            } else {
+            } else if (::locationText.isInitialized) {
                 locationText.text = "GPS permission nahi mili"
             }
         }
@@ -110,16 +112,18 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         addressExecutor = Executors.newSingleThreadExecutor()
-
         Configuration.getInstance().userAgentValue = packageName
 
         createUI()
 
+        // Native library is optional for the camera UI.
         try {
             System.loadLibrary("sada-native")
             getNativeMessage()
+        } catch (_: UnsatisfiedLinkError) {
+            // Continue without the native library.
         } catch (_: Exception) {
-            // Native library is optional for the camera UI.
+            // Continue without optional native functionality.
         }
 
         requestAppPermissions()
@@ -133,9 +137,11 @@ class MainActivity : ComponentActivity() {
                 }
             }
         } catch (_: Exception) {
-            // Camera remains usable if ads fail to initialize.
+            // Camera can still work if ads fail.
         }
     }
+
+    private external fun getNativeMessage(): String
 
     private fun dp(value: Int): Int =
         (value * resources.displayMetrics.density + 0.5f).toInt()
@@ -147,8 +153,16 @@ class MainActivity : ComponentActivity() {
         ) == PackageManager.PERMISSION_GRANTED
     }
 
+    private fun toast(message: String) {
+        Toast.makeText(
+            this,
+            message,
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
     // --------------------------------------------------
-    // UI
+    // MAIN UI
     // --------------------------------------------------
 
     private fun createUI() {
@@ -174,7 +188,7 @@ class MainActivity : ComponentActivity() {
             )
         )
 
-        // Camera preview with mini map in the corner.
+        // Camera preview and mini-map overlay.
         val cameraFrame = FrameLayout(this)
 
         previewView = PreviewView(this).apply {
@@ -262,13 +276,14 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { flipCamera() }
         }
 
-        val mapButton = Button(this).apply {
-            text = "OPEN MAP"
+        // Replaces OPEN MAP with OPEN GALLERY.
+        val galleryButton = Button(this).apply {
+            text = "OPEN GALLERY"
             textSize = 10f
             minWidth = 0
             minimumWidth = 0
             isAllCaps = false
-            setOnClickListener { openMap() }
+            setOnClickListener { openGalleryFolder() }
         }
 
         fun buttonParams() = LinearLayout.LayoutParams(
@@ -281,7 +296,7 @@ class MainActivity : ComponentActivity() {
 
         buttons.addView(captureButton, buttonParams())
         buttons.addView(flipButton, buttonParams())
-        buttons.addView(mapButton, buttonParams())
+        buttons.addView(galleryButton, buttonParams())
 
         root.addView(
             buttons,
@@ -292,6 +307,7 @@ class MainActivity : ComponentActivity() {
         )
 
         adView = AdView(this).apply {
+            // Your configured AdMob banner unit.
             adUnitId = "ca-app-pub-7597829209651046/3947878005"
             setAdSize(AdSize.BANNER)
         }
@@ -380,6 +396,7 @@ class MainActivity : ComponentActivity() {
                     .build()
 
                 provider.unbindAll()
+
                 provider.bindToLifecycle(
                     this,
                     selector,
@@ -401,7 +418,9 @@ class MainActivity : ComponentActivity() {
                     }
 
             } catch (e: Exception) {
-                toast("Camera start nahi hua: ${e.message ?: "Unknown error"}")
+                toast(
+                    "Camera start nahi hua: ${e.message ?: "Unknown error"}"
+                )
             }
 
         }, ContextCompat.getMainExecutor(this))
@@ -515,7 +534,10 @@ class MainActivity : ComponentActivity() {
     // --------------------------------------------------
 
     private fun resolveAddress(location: Location) {
-        val prefs = getSharedPreferences("gps_camera_cache", MODE_PRIVATE)
+        val prefs = getSharedPreferences(
+            "gps_camera_cache",
+            MODE_PRIVATE
+        )
 
         val cachedLat = prefs.getString("lat", null)?.toDoubleOrNull()
         val cachedLon = prefs.getString("lon", null)?.toDoubleOrNull()
@@ -557,7 +579,10 @@ class MainActivity : ComponentActivity() {
                     location.longitude,
                     1,
                     object : Geocoder.GeocodeListener {
-                        override fun onGeocode(addresses: MutableList<Address>) {
+
+                        override fun onGeocode(
+                            addresses: MutableList<Address>
+                        ) {
                             runOnUiThread {
                                 if (!isFinishing && !isDestroyed) {
                                     applyAddressResult(addresses, location)
@@ -597,7 +622,10 @@ class MainActivity : ComponentActivity() {
 
                     runOnUiThread {
                         if (!isFinishing && !isDestroyed) {
-                            applyAddressResult(addresses.orEmpty(), location)
+                            applyAddressResult(
+                                addresses.orEmpty(),
+                                location
+                            )
                         }
                     }
                 } catch (_: Exception) {
@@ -639,7 +667,10 @@ class MainActivity : ComponentActivity() {
         if (!formatted.isNullOrBlank()) {
             currentAddress = formatted
 
-            getSharedPreferences("gps_camera_cache", MODE_PRIVATE)
+            getSharedPreferences(
+                "gps_camera_cache",
+                MODE_PRIVATE
+            )
                 .edit()
                 .putString("lat", location.latitude.toString())
                 .putString("lon", location.longitude.toString())
@@ -691,7 +722,8 @@ class MainActivity : ComponentActivity() {
             "gps_${System.currentTimeMillis()}.jpg"
         )
 
-        val options = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+        val options =
+            ImageCapture.OutputFileOptions.Builder(photoFile).build()
 
         try {
             capture.takePicture(
@@ -718,7 +750,6 @@ class MainActivity : ComponentActivity() {
                                 photoFile
                             )
 
-                            // Wait for map layout/rendering before drawing it.
                             if (::miniMapView.isInitialized) {
                                 miniMapView.invalidate()
                             }
@@ -752,19 +783,26 @@ class MainActivity : ComponentActivity() {
                             isCapturing = false
 
                             if (!isFinishing && !isDestroyed) {
-                                captureButton.isEnabled = imageCapture != null
-                                flipButton.isEnabled = cameraProvider != null
+                                captureButton.isEnabled =
+                                    imageCapture != null
+                                flipButton.isEnabled =
+                                    cameraProvider != null
                             }
                         }
                     }
 
-                    override fun onError(exception: ImageCaptureException) {
+                    override fun onError(
+                        exception: ImageCaptureException
+                    ) {
                         photoFile.delete()
                         isCapturing = false
 
                         if (!isFinishing && !isDestroyed) {
-                            captureButton.isEnabled = imageCapture != null
-                            flipButton.isEnabled = cameraProvider != null
+                            captureButton.isEnabled =
+                                imageCapture != null
+                            flipButton.isEnabled =
+                                cameraProvider != null
+
                             toast(
                                 "Photo nahi li ja saki: " +
                                     (exception.message ?: "Unknown error")
@@ -840,7 +878,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------
-    // WATERMARK + MAP ON SAVED PHOTO
+    // WATERMARK + MAP ON PHOTO
     // --------------------------------------------------
 
     private fun addWatermark(source: Bitmap): Bitmap {
@@ -891,16 +929,15 @@ class MainActivity : ComponentActivity() {
         )
 
         val location = currentLocation
+
         val date = SimpleDateFormat(
             "dd MMM yyyy, hh:mm:ss a",
             Locale.getDefault()
         ).format(Date())
 
-        // Reserve space on the right for the map.
+        // Leave room at bottom-right for the mini-map.
         val mapWidth = (width * 0.29f).toInt()
         val mapHeight = (height * 0.19f).toInt()
-        val mapGap = padding
-
         val mapLeft = width - mapWidth - padding
         val mapTop = height - mapHeight - padding
         val textMaxWidth = (mapLeft - padding * 2).coerceAtLeast(1f)
@@ -916,10 +953,13 @@ class MainActivity : ComponentActivity() {
 
         val detailLines = mutableListOf<String>()
 
-        val address = currentAddress
-        if (address.isNotBlank()) {
+        if (currentAddress.isNotBlank()) {
             detailLines.addAll(
-                wrapText(address, textPaint, textMaxWidth)
+                wrapText(
+                    currentAddress,
+                    textPaint,
+                    textMaxWidth
+                )
             )
         }
 
@@ -937,8 +977,8 @@ class MainActivity : ComponentActivity() {
         ).toInt().coerceAtLeast(2)
 
         val visibleLines = detailLines.take(maximumLines)
-
-        val detailsTop = (height - mapHeight - padding).coerceAtLeast(topHeight)
+        val detailsTop =
+            (height - mapHeight - padding).coerceAtLeast(topHeight)
 
         canvas.drawRect(
             0f,
@@ -961,7 +1001,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        // Render the mini map into the saved image.
+        // Draw the mini-map into the saved photo.
         if (
             ::miniMapView.isInitialized &&
             miniMapView.width > 0 &&
@@ -1008,7 +1048,7 @@ class MainActivity : ComponentActivity() {
                     borderPaint
                 )
             } catch (_: Exception) {
-                // Keep the photo even if map rendering fails.
+                // Preserve the photo if map drawing fails.
             } finally {
                 mapBitmap?.recycle()
             }
@@ -1067,7 +1107,7 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------
-    // SAVE TO GALLERY
+    // SAVE PHOTO TO Pictures/GPS Camera
     // --------------------------------------------------
 
     private fun saveToGallery(bitmap: Bitmap) {
@@ -1096,14 +1136,24 @@ class MainActivity : ComponentActivity() {
         val uri = contentResolver.insert(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             values
-        ) ?: throw IllegalStateException("Gallery mein photo save nahi hui")
+        ) ?: throw IllegalStateException(
+            "Gallery mein photo save nahi hui"
+        )
 
         try {
             val stream = contentResolver.openOutputStream(uri)
-                ?: throw IllegalStateException("Output stream unavailable")
+                ?: throw IllegalStateException(
+                    "Output stream unavailable"
+                )
 
             stream.use {
-                if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)) {
+                if (
+                    !bitmap.compress(
+                        Bitmap.CompressFormat.JPEG,
+                        95,
+                        it
+                    )
+                ) {
                     throw IllegalStateException("JPEG save failed")
                 }
             }
@@ -1116,7 +1166,7 @@ class MainActivity : ComponentActivity() {
                 contentResolver.update(uri, completed, null, null)
             }
 
-            toast("Photo Gallery mein save ho gayi!")
+            toast("Photo Pictures/GPS Camera mein save ho gayi!")
 
         } catch (e: Exception) {
             contentResolver.delete(uri, null, null)
@@ -1125,36 +1175,185 @@ class MainActivity : ComponentActivity() {
     }
 
     // --------------------------------------------------
-    // OPEN MAP APP
+    // OPEN APP'S OWN GALLERY
     // --------------------------------------------------
 
-    private fun openMap() {
-        val location = currentLocation
+    private fun openGalleryFolder() {
+        val dialog = Dialog(this)
 
-        if (location == null) {
-            updateLocation()
-            toast("GPS location ka intezar karo")
-            return
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.BLACK)
         }
 
-        val uri = Uri.parse(
-            "geo:${location.latitude},${location.longitude}" +
-                "?q=${location.latitude},${location.longitude}"
+        val header = TextView(this).apply {
+            text = "GPS CAMERA PHOTOS"
+            textSize = 19f
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+        }
+
+        root.addView(
+            header,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         )
 
-        try {
-            startActivity(Intent(Intent.ACTION_VIEW, uri))
-        } catch (_: Exception) {
-            toast("Map app available nahi hai")
-        }
-    }
+        val scrollView = ScrollView(this)
 
-    private fun toast(message: String) {
-        Toast.makeText(
-            this,
-            message,
-            Toast.LENGTH_LONG
-        ).show()
+        val photoList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+
+        scrollView.addView(
+            photoList,
+            ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        root.addView(
+            scrollView,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+
+        val backButton = Button(this).apply {
+            text = "BACK TO CAMERA"
+            isAllCaps = false
+            setOnClickListener { dialog.dismiss() }
+        }
+
+        root.addView(
+            backButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(52)
+            )
+        )
+
+        dialog.setContentView(root)
+        dialog.setCancelable(true)
+
+        // Find only photos in Pictures/GPS Camera.
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.DISPLAY_NAME
+        )
+
+        val selection: String
+        val selectionArgs: Array<String>
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            selection =
+                "${MediaStore.Images.Media.RELATIVE_PATH} = ?"
+            selectionArgs = arrayOf("Pictures/GPS Camera/")
+        } else {
+            @Suppress("DEPRECATION")
+            val dataColumn = MediaStore.Images.Media.DATA
+
+            selection = "$dataColumn LIKE ?"
+            selectionArgs = arrayOf(
+                "%/Pictures/GPS Camera/%"
+            )
+        }
+
+        try {
+            contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                "${MediaStore.Images.Media.DATE_ADDED} DESC"
+            )?.use { cursor ->
+
+                val idColumn = cursor.getColumnIndexOrThrow(
+                    MediaStore.Images.Media._ID
+                )
+
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idColumn)
+
+                    val imageUri = Uri.withAppendedPath(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        id.toString()
+                    )
+
+                    val imageView = ImageView(this).apply {
+                        setImageURI(imageUri)
+                        adjustViewBounds = true
+                        scaleType = ImageView.ScaleType.FIT_CENTER
+                        contentDescription = "Saved GPS Camera photo"
+                        setBackgroundColor(Color.rgb(25, 25, 25))
+                    }
+
+                    photoList.addView(
+                        imageView,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT
+                        ).apply {
+                            bottomMargin = dp(12)
+                        }
+                    )
+
+                    val divider = ViewGroup(this).apply {
+                        setBackgroundColor(Color.DKGRAY)
+                    }
+
+                    photoList.addView(
+                        divider,
+                        LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            dp(1)
+                        )
+                    )
+                }
+            }
+
+            if (photoList.childCount == 0) {
+                val emptyText = TextView(this).apply {
+                    text = "Abhi GPS Camera folder mein koi photo nahi hai."
+                    textSize = 16f
+                    setTextColor(Color.WHITE)
+                    gravity = Gravity.CENTER
+                    setPadding(
+                        dp(16),
+                        dp(30),
+                        dp(16),
+                        dp(30)
+                    )
+                }
+
+                photoList.addView(
+                    emptyText,
+                    LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT
+                    )
+                )
+            }
+
+        } catch (e: Exception) {
+            toast(
+                "Photos load nahi hui: ${e.message ?: "Unknown error"}"
+            )
+        }
+
+        dialog.show()
+
+        dialog.window?.setLayout(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
     }
 
     // --------------------------------------------------
